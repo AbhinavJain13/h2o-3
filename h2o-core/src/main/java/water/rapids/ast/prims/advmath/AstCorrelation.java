@@ -2,9 +2,7 @@ package water.rapids.ast.prims.advmath;
 
 import water.Key;
 import water.MRTask;
-import water.fvec.Chunk;
-import water.fvec.Frame;
-import water.fvec.Vec;
+import water.fvec.*;
 import water.rapids.Env;
 import water.rapids.Val;
 import water.rapids.vals.ValFrame;
@@ -155,12 +153,12 @@ public class AstCorrelation extends AstPrimitive {
       }
 
       //Get sigma of x vecs
-      for(int x = 0; x < ncolx; x++){
+      for (int x = 0; x < ncolx; x++) {
         sigmax[x] = vecxs[x].sigma();
       }
 
       //Denominator for correlation calculation is sigma_y * sigma_x (All x sigmas vs one Y)
-      for(int y = 0; y < ncoly; y++) {
+      for (int y = 0; y < ncoly; y++) {
         for (int x = 0; x < ncolx; x++) {
           denom[y][x] = sigmay[y] * sigmax[x];
         }
@@ -168,7 +166,7 @@ public class AstCorrelation extends AstPrimitive {
 
       // 1-col returns scalar
       if (ncolx == 1 && ncoly == 1) {
-        return new ValNum((cvs[0].getResult()._covs[0] / (fry.numRows() - 1))/denom[0][0]);
+        return new ValNum((cvs[0].getResult()._covs[0] / (fry.numRows() - 1)) / denom[0][0]);
       }
 
       //Gather final result, which is the correlation coefficient per column
@@ -181,50 +179,83 @@ public class AstCorrelation extends AstPrimitive {
       return new ValFrame(new Frame(fry._names, res));
     } else { //if (mode.equals(Mode.CompleteObs))
 
-      CoVarTaskCompleteObsMean taskCompleteObsMean = new CoVarTaskCompleteObsMean(ncoly, ncolx).doAll(new Frame(fry).add(frx));
-      long NACount = taskCompleteObsMean._NACount;
-      double[] ymeans = ArrayUtils.div(taskCompleteObsMean._ysum, (fry.numRows() - NACount));
-      double[] xmeans = ArrayUtils.div(taskCompleteObsMean._xsum, (fry.numRows() - NACount));
+      //Omit NA rows between X and Y. Will help with sigma calculation later as we only want to calculate sigma
+      //for rows with no NAs
+      Frame frxy = new Frame(fry).add(frx);
+      Frame frxy_naomit = new MRTask() {
+        private void copyRow(int row, Chunk[] cs, NewChunk[] ncs) {
+          for (int i = 0; i < cs.length; ++i) {
+            if (cs[i] instanceof CStrChunk) ncs[i].addStr(cs[i], row);
+            else if (cs[i] instanceof C16Chunk) ncs[i].addUUID(cs[i], row);
+            else if (cs[i].hasFloat()) ncs[i].addNum(cs[i].atd(row));
+            else ncs[i].addNum(cs[i].at8(row), 0);
+          }
+        }
 
-      // 1 task with all Xs and Ys
-      CoVarTaskCompleteObs cvs = new CoVarTaskCompleteObs(ymeans, xmeans).doAll(new Frame(fry).add(frx));
+        @Override
+        public void map(Chunk[] cs, NewChunk[] ncs) {
+          int col;
+          for (int row = 0; row < cs[0]._len; ++row) {
+            for (col = 0; col < cs.length; ++col)
+              if (cs[col].isNA(row)) break;
+            if (col == cs.length) copyRow(row, cs, ncs);
+          }
+        }
+      }.doAll(frxy.types(), frxy).outputFrame(frxy.names(), frxy.domains());
 
-      //Set up double arrays to capture sd(y) and sd(x) * sd(y)
-      double[] sigmay = new double[ncoly];
-      double[] sigmax = new double[ncolx];
-      double[][] denom = new double[ncoly][ncolx];
+      //Collect new vecs that do not contain NA rows
+      Frame frx_naomit = frxy_naomit.subframe(0, ncolx);
+      Frame fry_naomit = frxy_naomit.subframe(ncolx,frxy_naomit.vecs().length);
+      Vec[] vecxs_naomit = frx_naomit.vecs();
+      int ncolx_naomit = vecxs_naomit.length;
+      Vec[] vecys_naomit = fry_naomit.vecs();
+      int ncoly_naomit = vecys_naomit.length;
+
+      CoVarTaskEverything[] cvs = new CoVarTaskEverything[ncoly_naomit];
+
+      double[] xmeans = new double[ncolx_naomit];
+      for (int x = 0; x < ncolx_naomit; x++) {
+        xmeans[x] = vecxs_naomit[x].mean();
+      }
+
+      //Set up double arrays to capture sd(x), sd(y) and sd(x) * sd(y)
+      double[] sigmay = new double[ncoly_naomit];
+      double[] sigmax = new double[ncolx_naomit];
+      double[][] denom = new double[ncoly_naomit][ncolx_naomit];
 
       // Launch tasks; each does all Xs vs one Y
-      for (int y = 0; y < ncoly; y++) {
-        //Get sigma_y
-        sigmay[y] = vecys[y].sigma();
+      for (int y = 0; y < ncoly_naomit; y++) {
+        //Get covariance between x and y
+        cvs[y] = new CoVarTaskEverything(vecys_naomit[y].mean(), xmeans).dfork(new Frame(vecys_naomit[y]).add(frx_naomit));
+        //Get sigma of y vecs
+        sigmay[y] = vecys_naomit[y].sigma();
       }
 
       //Get sigma of x vecs
-      for(int x = 0; x < ncolx; x++){
-        sigmax[x] = vecxs[x].sigma();
+      for (int x = 0; x < ncolx_naomit; x++) {
+        sigmax[x] = vecxs_naomit[x].sigma();
       }
 
       //Denominator for correlation calculation is sigma_y * sigma_x (All x sigmas vs one Y)
-      for(int y = 0; y < ncoly; y++) {
-        for (int x = 0; x < ncolx; x++) {
+      for (int y = 0; y < ncoly_naomit; y++) {
+        for (int x = 0; x < ncolx_naomit; x++) {
           denom[y][x] = sigmay[y] * sigmax[x];
         }
       }
 
       // 1-col returns scalar
-      if (ncolx == 1 && ncoly == 1) {
-        return new ValNum((cvs._covs[0][0] / (fry.numRows() - 1 - NACount))/denom[0][0]);
+      if (ncolx_naomit == 1 && ncoly_naomit == 1) {
+        return new ValNum((cvs[0].getResult()._covs[0] / (fry_naomit.numRows() - 1)) / denom[0][0]);
       }
 
       //Gather final result, which is the correlation coefficient per column
-      Vec[] res = new Vec[ncoly];
-      Key<Vec>[] keys = Vec.VectorGroup.VG_LEN1.addVecs(ncoly);
-      for (int y = 0; y < ncoly; y++) {
-        res[y] = Vec.makeVec(ArrayUtils.div(ArrayUtils.div(cvs._covs[y], (fry.numRows() - 1 - NACount)), denom[y]), keys[y]);
+      Vec[] res = new Vec[ncoly_naomit];
+      Key<Vec>[] keys = Vec.VectorGroup.VG_LEN1.addVecs(ncoly_naomit);
+      for (int y = 0; y < ncoly_naomit; y++) {
+        res[y] = Vec.makeVec(ArrayUtils.div(ArrayUtils.div(cvs[y].getResult()._covs, (fry_naomit.numRows() - 1)), denom[y]), keys[y]);
       }
 
-      return new ValFrame(new Frame(fry._names, res));
+      return new ValFrame(new Frame(fry_naomit._names, res));
     }
   }
 
@@ -259,141 +290,4 @@ public class AstCorrelation extends AstPrimitive {
       ArrayUtils.add(_covs, cvt._covs);
     }
   }
-
-
-  private static class CoVarTaskCompleteObsMean extends MRTask<CoVarTaskCompleteObsMean> {
-    double[] _xsum, _ysum;
-    long _NACount;
-    int _ncolx, _ncoly;
-
-    CoVarTaskCompleteObsMean(int ncoly, int ncolx) {
-      _ncolx = ncolx;
-      _ncoly = ncoly;
-    }
-
-    @Override
-    public void map(Chunk cs[]) {
-      _xsum = new double[_ncolx];
-      _ysum = new double[_ncoly];
-
-      double[] xvals = new double[_ncolx];
-      double[] yvals = new double[_ncoly];
-
-      double xval, yval;
-      boolean add;
-      int len = cs[0]._len;
-      for (int row = 0; row < len; row++) {
-        add = true;
-        //reset existing arrays to 0 rather than initializing new ones to save on garbage collection
-        Arrays.fill(xvals, 0);
-        Arrays.fill(yvals, 0);
-
-        for (int y = 0; y < _ncoly; y++) {
-          final Chunk cy = cs[y];
-          yval = cy.atd(row);
-          //if any yval along a row is NA, discard the entire row
-          if (Double.isNaN(yval)) {
-            _NACount++;
-            add = false;
-            break;
-          }
-          yvals[y] = yval;
-        }
-        if (add) {
-          for (int x = 0; x < _ncolx; x++) {
-            final Chunk cx = cs[x + _ncoly];
-            xval = cx.atd(row);
-            //if any xval along a row is NA, discard the entire row
-            if (Double.isNaN(xval)) {
-              _NACount++;
-              add = false;
-              break;
-            }
-            xvals[x] = xval;
-          }
-        }
-        //add is true iff row has been traversed and found no NAs among yvals and xvals
-        if (add) {
-          ArrayUtils.add(_xsum, xvals);
-          ArrayUtils.add(_ysum, yvals);
-        }
-      }
-    }
-
-    @Override
-    public void reduce(CoVarTaskCompleteObsMean cvt) {
-      ArrayUtils.add(_xsum, cvt._xsum);
-      ArrayUtils.add(_ysum, cvt._ysum);
-      _NACount += cvt._NACount;
-    }
-  }
-
-  private static class CoVarTaskCompleteObs extends MRTask<CoVarTaskCompleteObs> {
-    double[][] _covs;
-    final double _xmeans[], _ymeans[];
-
-    CoVarTaskCompleteObs(double[] ymeans, double[] xmeans) {
-      _ymeans = ymeans;
-      _xmeans = xmeans;
-    }
-
-    @Override
-    public void map(Chunk cs[]) {
-      int ncolx = _xmeans.length;
-      int ncoly = _ymeans.length;
-      double[] xvals = new double[ncolx];
-      double[] yvals = new double[ncoly];
-      _covs = new double[ncoly][ncolx];
-      double[] _covs_y;
-      double xval, yval, ymean;
-      boolean add;
-      int len = cs[0]._len;
-      for (int row = 0; row < len; row++) {
-        add = true;
-        //reset existing arrays to 0 rather than initializing new ones to save on garbage collection
-        Arrays.fill(xvals, 0);
-        Arrays.fill(yvals, 0);
-
-        for (int y = 0; y < ncoly; y++) {
-          final Chunk cy = cs[y];
-          yval = cy.atd(row);
-          //if any yval along a row is NA, discard the entire row
-          if (Double.isNaN(yval)) {
-            add = false;
-            break;
-          }
-          yvals[y] = yval;
-        }
-        if (add) {
-          for (int x = 0; x < ncolx; x++) {
-            final Chunk cx = cs[x + ncoly];
-            xval = cx.atd(row);
-            //if any xval along a row is NA, discard the entire row
-            if (Double.isNaN(xval)) {
-              add = false;
-              break;
-            }
-            xvals[x] = xval;
-          }
-        }
-        //add is true iff row has been traversed and found no NAs among yvals and xvals
-        if (add) {
-          for (int y = 0; y < ncoly; y++) {
-            _covs_y = _covs[y];
-            yval = yvals[y];
-            ymean = _ymeans[y];
-            for (int x = 0; x < ncolx; x++) {
-              _covs_y[x] += (xvals[x] - _xmeans[x]) * (yval - ymean);
-            }
-          }
-        }
-      }
-    }
-
-    @Override
-    public void reduce(CoVarTaskCompleteObs cvt) {
-      ArrayUtils.add(_covs, cvt._covs);
-    }
-  }
-
 }
