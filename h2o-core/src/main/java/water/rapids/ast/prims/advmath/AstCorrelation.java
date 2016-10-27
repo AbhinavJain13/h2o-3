@@ -11,8 +11,6 @@ import water.rapids.ast.AstPrimitive;
 import water.rapids.ast.AstRoot;
 import water.util.ArrayUtils;
 
-import java.util.Arrays;
-
 /**
  * Calculate Pearson's Correlation Coefficient between columns of a frame
  * <p/>
@@ -132,7 +130,7 @@ public class AstCorrelation extends AstPrimitive {
           if (v.naCnt() != 0)
             throw new IllegalArgumentException("Mode is 'all.obs' but NAs are present");
       }
-      CoVarTaskEverything[] cvs = new CoVarTaskEverything[ncoly];
+      CoVarTask[] cvs = new CoVarTask[ncoly];
 
       double[] xmeans = new double[ncolx];
       for (int x = 0; x < ncolx; x++) {
@@ -147,7 +145,7 @@ public class AstCorrelation extends AstPrimitive {
       // Launch tasks; each does all Xs vs one Y
       for (int y = 0; y < ncoly; y++) {
         //Get covariance between x and y
-        cvs[y] = new CoVarTaskEverything(vecys[y].mean(), xmeans).dfork(new Frame(vecys[y]).add(frx));
+        cvs[y] = new CoVarTask(vecys[y].mean(), xmeans).dfork(new Frame(vecys[y]).add(frx));
         //Get sigma of y vecs
         sigmay[y] = vecys[y].sigma();
       }
@@ -179,7 +177,8 @@ public class AstCorrelation extends AstPrimitive {
       return new ValFrame(new Frame(fry._names, res));
     } else { //if (mode.equals(Mode.CompleteObs))
 
-      //Omit NA rows between X and Y. Will help with sigma calculation later as we only want to calculate sigma
+      //Omit NA rows between X and Y.
+      //This will help with cov, sigma & mean calculations later as we only want to calculate cov, sigma & mean
       //for rows with no NAs
       Frame frxy = new Frame(fry).add(frx);
       Frame frxy_naomit = new MRTask() {
@@ -211,7 +210,8 @@ public class AstCorrelation extends AstPrimitive {
       Vec[] vecys_naomit = fry_naomit.vecs();
       int ncoly_naomit = vecys_naomit.length;
 
-      CoVarTaskEverything[] cvs = new CoVarTaskEverything[ncoly_naomit];
+      //Set up Cov
+      CoVarTask[] cvs = new CoVarTask[ncoly_naomit];
 
       double[] xmeans = new double[ncolx_naomit];
       for (int x = 0; x < ncolx_naomit; x++) {
@@ -226,7 +226,7 @@ public class AstCorrelation extends AstPrimitive {
       // Launch tasks; each does all Xs vs one Y
       for (int y = 0; y < ncoly_naomit; y++) {
         //Get covariance between x and y
-        cvs[y] = new CoVarTaskEverything(vecys_naomit[y].mean(), xmeans).dfork(new Frame(vecys_naomit[y]).add(frx_naomit));
+        cvs[y] = new CoVarTask(vecys_naomit[y].mean(), xmeans).dfork(new Frame(vecys_naomit[y]).add(frx_naomit));
         //Get sigma of y vecs
         sigmay[y] = vecys_naomit[y].sigma();
       }
@@ -259,11 +259,11 @@ public class AstCorrelation extends AstPrimitive {
     }
   }
 
-  private static class CoVarTaskEverything extends MRTask<CoVarTaskEverything> {
+  private static class CoVarTask extends MRTask<CoVarTask> {
     double[] _covs;
     final double _xmeans[], _ymean;
 
-    CoVarTaskEverything(double ymean, double[] xmeans) {
+    CoVarTask(double ymean, double[] xmeans) {
       _ymean = ymean;
       _xmeans = xmeans;
     }
@@ -286,7 +286,7 @@ public class AstCorrelation extends AstPrimitive {
     }
 
     @Override
-    public void reduce(CoVarTaskEverything cvt) {
+    public void reduce(CoVarTask cvt) {
       ArrayUtils.add(_covs, cvt._covs);
     }
   }
