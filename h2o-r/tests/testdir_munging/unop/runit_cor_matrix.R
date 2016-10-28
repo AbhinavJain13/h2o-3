@@ -53,7 +53,7 @@ run.cor.tests <- function (g,h,one_row=FALSE,has_nas=FALSE) {
       print("R cor():")
       print(paste0("Use: ",use))
       print(R_cor)
-      h2o_and_R_equal(h2o_cor, R_cor, tol=1e-1)
+      h2o_and_R_equal(h2o_cor, R_cor)
     }
   }
 }
