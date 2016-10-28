@@ -180,7 +180,7 @@ public class AstCorrelation extends AstPrimitive {
       //Omit NA rows between X and Y.
       //This will help with cov, sigma & mean calculations later as we only want to calculate cov, sigma & mean
       //for rows with no NAs
-      Frame frxy = new Frame(fry).add(frx);
+      Frame frxy = new Frame(frx).add(fry);
       Frame frxy_naomit = new MRTask() {
         private void copyRow(int row, Chunk[] cs, NewChunk[] ncs) {
           for (int i = 0; i < cs.length; ++i) {
